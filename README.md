@@ -2,6 +2,11 @@
 
 <h1><img src="docs/media/logo.png" alt="" width="72" align="center" />&nbsp; Mika</h1>
 
+> **这是上游 [wangzan101/Mika](https://github.com/wangzan101/Mika) 的一个协作派生仓库（fork-like snapshot）**，基线提交 `736b53d98b2975335d08eb1755055d1d08d1e894`（2026-11-01）。
+> 本仓库唯一的改动是：**修复「决策类模型（decision / startlux）探测失败会把整家服务商判成不可用」**，并禁止此类模型被设为主模型。
+> 完整改动说明、diff 与验证记录见 [`docs/decision-nonmain/`](docs/decision-nonmain/README.md)。
+> 许可与上游一致（Apache-2.0），原作者版权保留；此处不作为官方发布渠道，正式版请到上游 releases 下载。
+
 <a href="https://github.com/wangzan101/Mika/stargazers"><img src="https://img.shields.io/github/stars/wangzan101/Mika?style=flat&logo=github&label=Star&color=1f6feb" alt="stars" /></a>
 <a href="https://github.com/wangzan101/Mika/releases"><img src="https://img.shields.io/github/downloads/wangzan101/Mika/total?label=%E4%B8%8B%E8%BD%BD&color=2ea043" alt="downloads" /></a>
 <a href="https://github.com/wangzan101/Mika/releases/latest"><img src="https://img.shields.io/github/v/release/wangzan101/Mika?include_prereleases&label=%E7%89%88%E6%9C%AC" alt="version" /></a>

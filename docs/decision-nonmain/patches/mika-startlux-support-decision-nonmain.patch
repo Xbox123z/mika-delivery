@@ -1,0 +1,303 @@
+diff --git a/app/src/main/java/com/wangzan101/mika/ui/ModelSetupScreen.kt b/app/src/main/java/com/wangzan101/mika/ui/ModelSetupScreen.kt
+index 8d6a2dd..293f367 100644
+--- a/app/src/main/java/com/wangzan101/mika/ui/ModelSetupScreen.kt
++++ b/app/src/main/java/com/wangzan101/mika/ui/ModelSetupScreen.kt
+@@ -288,6 +288,7 @@ private fun ProvidersSection(ui: ModelSetupUi, actions: ModelSetupActions) {
+         }
+     }
+     ui.probeNote?.let { FooterNote(it, Modifier.testTag("setup-probe-note"), color = c.warn) }
++    ui.nonMainRoleNote?.let { FooterNote(it, Modifier.testTag("setup-non-main-note"), color = c.warn) }
+     // 刚存下的那家一个模型都没试通过:直接去选主模型(选的时候先试调用)
+     if (ui.pickToProbe != null && ui.roles.main == null) {
+         Text(
+diff --git a/app/src/main/java/com/wangzan101/mika/ui/ModelSetupViewModel.kt b/app/src/main/java/com/wangzan101/mika/ui/ModelSetupViewModel.kt
+index f3c5e96..42c9331 100644
+--- a/app/src/main/java/com/wangzan101/mika/ui/ModelSetupViewModel.kt
++++ b/app/src/main/java/com/wangzan101/mika/ui/ModelSetupViewModel.kt
+@@ -209,6 +209,8 @@ data class ModelSetupUi(
+     val pickToProbe: String? = null,
+     /** 选择页里手填模型名后试调用的进度(按服务商 id)。 */
+     val manualPick: Map<String, ListState> = emptyMap(),
++    /** 想把只能做别的用途的模型(决策模型那一类)设成主模型时的一句提醒:改用途或重新选主模型时清掉。 */
++    val nonMainRoleNote: String? = null,
+     /** 服务商页「重新测试」的进度(按服务商 id)。 */
+     val retest: Map<String, ListState> = emptyMap(),
+ ) {
+@@ -460,7 +462,7 @@ class ModelSetupViewModel(
+             _state.update {
+                 snapshot(it.copy(
+                     form = AddForm.of(ProviderPresets.all.first()), formOpen = false,
+-                    probeNote = probeNote(probed), pickToProbe = saved.id.takeIf { noneUsable },
++                    probeNote = probeNote(probed), pickToProbe = saved.id.takeIf { noneUsable }, nonMainRoleNote = null,
+                 ))
+             }
+         }
+@@ -485,11 +487,20 @@ class ModelSetupViewModel(
+         val model: String, val reason: String, val notAvailable: Boolean, val serverSide: Boolean = false,
+     )
+ 
++    /** [model] 是不是只能做非主力的用途:名子里带 [NON_MAIN_MODEL_TOKENS] 的决策模型回答走的是 /v1/decisions 这类自己的接口。 */
++    private fun isNonMainOnly(model: String): Boolean = NON_MAIN_MODEL_TOKENS.any { model.contains(it, ignoreCase = true) }
++
++    /** 想把 [model] 当主模型时的拦法:只能做非主力用途的模型给一句原因,能当主模型的为 null。 */
++    private fun nonMainReason(model: String): String? = if (isNonMainOnly(model)) tr(R.string.model_non_main_as_main, model) else null
++
+     /** 有列表时试调用的结果:[Blocked] 是第一个就因为模型以外的原因失败,不存;[Done] 见 [probe]。 */
+     private sealed interface ListProbe {
+         data class Blocked(val message: String) : ListProbe
+-        /** [main] 是通过了的模型;[rejected] 是在它之前试过、没通过的。都为空是没有可试的模型。 */
+-        data class Done(val main: String?, val rejected: List<Rejected>) : ListProbe
++        /**
++         * [main] 是通过了的模型;[rejected] 是在它之前试过、没通过的。都为空是没有可试的模型。
++         * [nonMain] 是名子里带 [NON_MAIN_MODEL_TOKENS] 的那几个(决策模型):它们走别的接口,见 [probe]。
++         */
++        data class Done(val main: String?, val rejected: List<Rejected>, val nonMain: List<String> = emptyList()) : ListProbe
+     }
+ 
+     /**
+@@ -500,6 +511,10 @@ class ModelSetupViewModel(
+      * 服务端出错(5xx)不一定整家不可用:聚合服务商把很多上游的模型放在同一个列表里,其中一个上游挂了也会这样。
+      * 所以 5xx 先按这个模型没通过记下、接着试下一个:后面有通过的,就说明是那个模型的问题,照常保存;
+      * 试的全都是这样,才当成整家不可用,不存。只碰到过 5xx 时 Key 还没证明是对的,这之后再碰到别的原因失败也照旧不存。
++     *
++     * 名子里带 [NON_MAIN_MODEL_TOKENS] 的是决策模型:它们回答走的是 /v1/decisions 这类自己的接口,不走对话接口,
++     * 让它们调用工具注定过不了(常见的是 Nginx 或中转站在对话接口上直接给 503)。这不是这一家出了问题,也不是这个账号没开通,
++     * 所以把它们记到 [ListProbe.Done.nonMain]:这家照旧存下、不定主模型,说一句让用户去「用途」里选(pick() 那头挡住当主模型)。
+      */
+     private suspend fun probe(f: AddForm, baseUrl: String, key: String?, models: List<ListedModel>): ListProbe {
+         // 用 ChatGPT 登录不走这张表单(登录本身就核对过了);表单只给 Key 的接口类型,这里再挡一次
+@@ -510,6 +525,7 @@ class ModelSetupViewModel(
+         val options = ModelOptions.merge(models, base)
+         val order = ModelOptions.candidates(options, f.familyTokens).ifEmpty { listOfNotNull(options.firstOrNull()?.id) }
+         val rejected = mutableListOf<Rejected>()
++        val nonMain = mutableListOf<String>()
+         var firstServerError: String? = null
+         for ((i, model) in order.take(PROBE_CANDIDATES).withIndex()) {
+             val caps = options.first { it.id == model }.capabilities
+@@ -518,10 +534,17 @@ class ModelSetupViewModel(
+                 ProbeOutcome.Passed -> return ListProbe.Done(model, rejected)
+                 is ProbeOutcome.NoToolCall -> rejected += Rejected(model, tr(R.string.model_reason_no_tools), notAvailable = false)
+                 is ProbeOutcome.Failed -> when {
++                    // 决策模型:工具调用这一关注定过不了,不怪这一家,留着结尾给用户去选别的用途
++                    isNonMainOnly(model) -> {
++                        rejected += Rejected(model, tr(R.string.model_reason_non_main), notAvailable = false)
++                        nonMain += model
++                    }
+                     o.modelReason != null -> {
+                         rejected += Rejected(model, o.modelReason, o.notAvailable, o.serverSide)
+                         if (o.serverSide && firstServerError == null) firstServerError = o.message
+                     }
++                    // 已经试出决策模型,而且这次的不是 Key、网络、地址这类问题:这一家连得上,存下让用户去选用途
++                    nonMain.isNotEmpty() && (o.serverSide || firstServerError != null) -> return ListProbe.Done(null, rejected, nonMain)
+                     // 前面只有 5xx 时 Key 还没证明是对的:再碰到 Key、网络、地址、超时这类,照旧不存
+                     firstServerError != null || i == 0 -> return ListProbe.Blocked(o.message)
+                     else -> {
+@@ -531,18 +554,25 @@ class ModelSetupViewModel(
+                 }
+             }
+         }
+-        // 试的全都是服务端出错:多半整家不可用,不存
+-        if (rejected.isNotEmpty() && rejected.all { it.serverSide }) {
++        // 试的全都是服务端出错:多半整家不可用,不存。里面有决策模型时例外——那不是这一家的问题
++        if (rejected.isNotEmpty() && rejected.all { it.serverSide } && nonMain.isEmpty()) {
+             return ListProbe.Blocked(firstServerError ?: rejected.first().reason)
+         }
+-        return ListProbe.Done(null, rejected)
++        return ListProbe.Done(null, rejected, nonMain)
+     }
+ 
++    // 存下服务商后给人看的一句:各家通用的那些见 [setupProbeNote]
+     /**
+-     * 存下服务商后给人看的一句:先试的没通过、后面的通过了,说哪些没通过、主模型用了哪个;
+-     * 都没通过,说第一个为什么没通过、试过哪些,请用户从列表里选。都顺利为 null。
++     * [probeNote] 再补一句:这家有决策模型([ListProbe.Done.nonMain])时,告诉用户这家存下了、到「用途」里选它。
+      */
+     private fun probeNote(r: ListProbe.Done): String? {
++        val note = setupProbeNote(r)
++        if (r.nonMain.isEmpty()) return note
++        val extra = tr(R.string.model_probe_non_main, r.nonMain.joinToString(tr(R.string.list_sep)))
++        return if (note == null) extra else "$note\n$extra"
++    }
++
++    private fun setupProbeNote(r: ListProbe.Done): String? {
+         if (r.rejected.isEmpty()) return null
+         val names = r.rejected.joinToString(tr(R.string.list_sep)) { it.model }
+         val first = r.rejected.first()
+@@ -777,13 +807,20 @@ class ModelSetupViewModel(
+     fun pick(role: ModelRole, providerId: String, model: String) {
+         val m = model.trim()
+         if (m.isEmpty()) return
++        // 决策模型:当不了主模型,说一句,现有的主模型不动
++        nonMainReason(m)?.takeIf { role == ModelRole.Main }?.let { why ->
++            _state.update { it.copy(nonMainRoleNote = why) }
++            return
++        }
+         scope.launch {
+             withContext(io) {
+                 val p = store.provider(providerId) ?: return@withContext
+                 use(role, p, m, ModelOptions.ofProvider(p, store.list()))
+             }
+             // 选好了主模型,试调用的说明就过去了
+-            _state.update { snapshot(if (role == ModelRole.Main) it.copy(probeNote = null, pickToProbe = null) else it) }
++            _state.update {
++                snapshot(if (role == ModelRole.Main) it.copy(probeNote = null, pickToProbe = null, nonMainRoleNote = null) else it)
++            }
+         }
+     }
+ 
+@@ -803,6 +840,11 @@ class ModelSetupViewModel(
+         val m = model.trim()
+         if (m.isEmpty() || _state.value.manualPick[providerId] == ListState.Running) return
+         val p = store.provider(providerId) ?: return
++        // 决策模型:手填的名字也一样当不了主模型
++        nonMainReason(m)?.takeIf { role == ModelRole.Main }?.let { why ->
++            _state.update { it.copy(manualPick = it.manualPick + (providerId to ListState.Failed(why)), nonMainRoleNote = why) }
++            return
++        }
+         _state.update { it.copy(manualPick = it.manualPick + (providerId to ListState.Running)) }
+         scope.launch {
+             val outcome = probeSaved(p, m)
+@@ -820,7 +862,7 @@ class ModelSetupViewModel(
+                 store.provider(p.id)?.let { fresh -> use(role, fresh, m, ModelOptions.ofProvider(fresh, store.list())) }
+             }
+             _state.update {
+-                snapshot(if (role == ModelRole.Main) it.copy(manualPick = it.manualPick - providerId, probeNote = null, pickToProbe = null)
++                snapshot(if (role == ModelRole.Main) it.copy(manualPick = it.manualPick - providerId, probeNote = null, pickToProbe = null, nonMainRoleNote = null)
+                     else it.copy(manualPick = it.manualPick - providerId))
+             }
+             onPicked()
+@@ -925,5 +967,11 @@ class ModelSetupViewModel(
+ 
+         /** 自定义服务商的名字最多几个字(服务商列表一行放得下)。 */
+         const val MAX_NAME = 32
++
++        /**
++         * 模型名里带这些词的(不分大小写)当作只能做非主力用途的决策模型:它们回答走自己的决策接口,
++         * 试调用工具注定过不了,否则有这种模型的一家会被整个挡在外面,白白浪费免费额度。
++         */
++        val NON_MAIN_MODEL_TOKENS = listOf("decision", "startlux")
+     }
+ }
+diff --git a/app/src/main/java/com/wangzan101/mika/ui/ModelsScreen.kt b/app/src/main/java/com/wangzan101/mika/ui/ModelsScreen.kt
+index 9974719..f943a78 100644
+--- a/app/src/main/java/com/wangzan101/mika/ui/ModelsScreen.kt
++++ b/app/src/main/java/com/wangzan101/mika/ui/ModelsScreen.kt
+@@ -193,6 +193,10 @@ fun RolePickerContent(ui: ModelSetupUi, role: ModelRole, actions: RolePickerActi
+     val q = filter.trim()
+     Page(ModelsCopy.roleName(role), onBack) {
+         Text(ModelsCopy.roleHint(role), Modifier.padding(top = 4.dp, bottom = 12.dp), fontSize = 14.5.sp, lineHeight = 22.sp, color = c.ink2)
++        // 刚被拦下的那句:想把决策模型设成主模型(见 ModelSetupViewModel.pick)
++        if (role == ModelRole.Main) ui.nonMainRoleNote?.let {
++            FooterNote(it, Modifier.testTag("pick-non-main-note"), color = c.bad)
++        }
+         val fixed = fixedChoices(role)
+         if (fixed.isNotEmpty()) {
+             GroupCard {
+diff --git a/app/src/main/res/values-b+zh+Hant/strings_setup.xml b/app/src/main/res/values-b+zh+Hant/strings_setup.xml
+index 7c14a35..439ac2b 100644
+--- a/app/src/main/res/values-b+zh+Hant/strings_setup.xml
++++ b/app/src/main/res/values-b+zh+Hant/strings_setup.xml
+@@ -67,4 +67,7 @@
+     <string name="model_probe_tried">試了 %1$s，都沒測試通過。</string>
+     <string name="model_probe_fallback">先試的 %1$s 沒測試通過：%2$s。主模型用了測試通過的「%3$s」。</string>
+     <string name="model_pick_main">選主模型</string>
++    <string name="model_reason_non_main">它走的是決策介面，工具呼叫這一關測試註定過不了</string>
++    <string name="model_probe_non_main">清單裡這幾個走的是決策介面而不是對話介面：%1$s。服務商已儲存，請在「用途」裡把它們選作看圖或輕量用途，不要當主模型。</string>
++    <string name="model_non_main_as_main">「%1$s」走的是決策介面、不會呼叫工具，不能當主模型。請在「用途」裡把它選作別的用途。</string>
+ </resources>
+diff --git a/app/src/main/res/values-zh/strings_setup.xml b/app/src/main/res/values-zh/strings_setup.xml
+index 2cd380c..495081d 100644
+--- a/app/src/main/res/values-zh/strings_setup.xml
++++ b/app/src/main/res/values-zh/strings_setup.xml
+@@ -67,4 +67,7 @@
+     <string name="model_probe_tried">试了 %1$s，都没测试通过。</string>
+     <string name="model_probe_fallback">先试的 %1$s 没测试通过：%2$s。主模型用了测试通过的「%3$s」。</string>
+     <string name="model_pick_main">选主模型</string>
++    <string name="model_reason_non_main">它走的是决策接口，工具调用这一关测试注定过不了</string>
++    <string name="model_probe_non_main">列表里这几个走的是决策接口而不是对话接口：%1$s。服务商已保存，请在「用途」里把它们选作看图或轻量用途，不要当主模型。</string>
++    <string name="model_non_main_as_main">「%1$s」走的是决策接口、不会调用工具，不能当主模型。请在「用途」里把它选作别的用途。</string>
+ </resources>
+diff --git a/app/src/main/res/values/strings_setup.xml b/app/src/main/res/values/strings_setup.xml
+index 97fe087..eca0553 100644
+--- a/app/src/main/res/values/strings_setup.xml
++++ b/app/src/main/res/values/strings_setup.xml
+@@ -67,4 +67,7 @@
+     <string name="model_probe_tried">Tried %1$s; none of them passed the test.</string>
+     <string name="model_probe_fallback">%1$s, tried first, didn’t pass the test: %2$s. The main model is “%3$s”, which passed.</string>
+     <string name="model_pick_main">Choose main model</string>
++    <string name="model_reason_non_main">it answers on another endpoint (a decision endpoint), so Mika’s tool-calling test can’t pass</string>
++    <string name="model_probe_non_main">These in the list answer on a decision endpoint instead of chat: %1$s. This provider is saved; pick one of them under Roles for another role—don’t use it as the main model.</string>
++    <string name="model_non_main_as_main">“%1$s” answers on a decision endpoint and can’t call tools, so it can’t be the main model. Pick it for another role instead.</string>
+ </resources>
+diff --git a/app/src/test/java/com/wangzan101/mika/ui/ModelSetupViewModelTest.kt b/app/src/test/java/com/wangzan101/mika/ui/ModelSetupViewModelTest.kt
+index cf547ee..23f1fc5 100644
+--- a/app/src/test/java/com/wangzan101/mika/ui/ModelSetupViewModelTest.kt
++++ b/app/src/test/java/com/wangzan101/mika/ui/ModelSetupViewModelTest.kt
+@@ -687,4 +687,67 @@ class ModelSetupViewModelTest {
+         assertEquals("", vm.state.value.form.name)
+         assertEquals("DeepSeek", vm.state.value.form.copy(name = "别的名字").providerName)
+     }
++
++    /**
++     * 只有决策模型的一家(例如只有 startlux-decision-27b-autothink 的中转):它回答走 /v1/decisions,
++     * 让它调用工具永远失败(中转站在对话接口上给 503)。这不是这一家挂了——照旧存下服务商、不定主模型,
++     * 说清它是走别的接口的、请到「用途」里选。
++     */
++    @Test fun providerWithOnlyDecisionModelsIsSavedWithoutAMainModel() = runTest {
++        val url = "https://api.bamboonode.dev/v1"
++        listing[url] = ModelListResult.Ok(listOf(ListedModel("startlux-decision-27b-autothink")))
++        reply = { throw ModelError.Server(503) }
++        val store = store()
++        val vm = vm(store)
++        vm.selectPreset(ProviderPresets.custom.label); vm.setBaseUrl(url); vm.setApiKey("sk"); vm.testAndSave(); runCurrent()
++        val p = store.providers.value.single()
++        assertEquals("试调用一次就够,不再试别的", listOf("startlux-decision-27b-autothink"), built.map { it.first })
++        assertEquals("key 存下了", "sk", store.providerKey(p.id))
++        assertNull("不定主模型", store.roles.value.main)
++        val s = vm.state.value
++        assertFalse(s.showForm)
++        assertEquals(ListState.Idle, s.form.test)
++        assertTrue(s.probeNote!!.contains("startlux-decision-27b-autothink"))
++        assertTrue(s.probeNote!!.contains("决策接口"))
++        assertTrue(s.probeNote!!.contains("「用途」"))
++        assertEquals(p.id, s.pickToProbe)
++        // 当主模型用:拦下,现有的主模型不动,说一句为什么
++        vm.pick(ModelRole.Main, p.id, "startlux-decision-27b-autothink"); runCurrent()
++        assertNull(store.roles.value.main)
++        assertTrue("设主模型被挡住了", vm.state.value.nonMainRoleNote!!.contains("startlux-decision-27b-autothink"))
++        assertTrue(vm.state.value.nonMainRoleNote!!.contains("不能当主模型"))
++        // 手填同一个名字也一样拦,且不发请求
++        vm.pickManual(ModelRole.Main, p.id, "startlux-decision-27b-autothink"); runCurrent()
++        assertNull(store.roles.value.main)
++        assertTrue(vm.state.value.manualPick[p.id] is ListState.Failed)
++        // 别的用途照选:不计较它不会调用工具
++        vm.pick(ModelRole.Light, p.id, "startlux-decision-27b-autothink"); runCurrent()
++        assertEquals("startlux-decision-27b-autothink", store.configFor(ModelRole.Light)?.model)
++        assertNull("主模型仍是空", store.roles.value.main)
++    }
++
++    /** 决策模型和通用模型在同一家:通用的当主模型;想把决策模型设成主模型被拦下,选了通用的提醒就没了。 */
++    @Test fun decisionModelIsRejectedAsMainButUsableForAnotherRole() = runTest {
++        val url = "https://api.bamboonode.dev/v1"
++        val decision = "startlux-decision-27b-autothink"
++        listing[url] = ModelListResult.Ok(listOf(ListedModel(decision), ListedModel("deepseek-chat")))
++        reply = {
++            if (built.last().first == decision) throw ModelError.Server(503)
++            ModelReply(listOf(Part.ToolCall("c1", "get_time", "{}")), StopReason.ToolUse, null)
++        }
++        val store = store()
++        val vm = vm(store)
++        vm.selectPreset(ProviderPresets.custom.label); vm.setBaseUrl(url); vm.setApiKey("sk"); vm.testAndSave(); runCurrent()
++        val p = store.providers.value.single()
++        assertEquals("deepseek-chat", store.configFor(ModelRole.Main)?.model)
++        assertTrue("deepseek-chat" in p.verifiedModels)
++        vm.pick(ModelRole.Main, p.id, decision); runCurrent()
++        assertEquals("主模型没被换掉", "deepseek-chat", store.configFor(ModelRole.Main)?.model)
++        assertTrue(vm.state.value.nonMainRoleNote!!.contains(decision))
++        vm.pick(ModelRole.Main, p.id, "deepseek-chat"); runCurrent()
++        assertNull("选好了主模型,提醒收起", vm.state.value.nonMainRoleNote)
++        // 看图、轻量:决策模型照样能占一个用途
++        vm.pick(ModelRole.Vision, p.id, decision); runCurrent()
++        assertEquals(decision, store.configFor(ModelRole.Vision)?.model)
++    }
+ }

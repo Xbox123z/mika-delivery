@@ -193,6 +193,10 @@ fun RolePickerContent(ui: ModelSetupUi, role: ModelRole, actions: RolePickerActi
     val q = filter.trim()
     Page(ModelsCopy.roleName(role), onBack) {
         Text(ModelsCopy.roleHint(role), Modifier.padding(top = 4.dp, bottom = 12.dp), fontSize = 14.5.sp, lineHeight = 22.sp, color = c.ink2)
+        // 刚被拦下的那句:想把决策模型设成主模型(见 ModelSetupViewModel.pick)
+        if (role == ModelRole.Main) ui.nonMainRoleNote?.let {
+            FooterNote(it, Modifier.testTag("pick-non-main-note"), color = c.bad)
+        }
         val fixed = fixedChoices(role)
         if (fixed.isNotEmpty()) {
             GroupCard {
