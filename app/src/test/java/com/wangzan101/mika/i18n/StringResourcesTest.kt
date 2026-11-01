@@ -1,0 +1,85 @@
+package com.wangzan101.mika.i18n
+
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Test
+import org.w3c.dom.Element
+import javax.xml.parsers.DocumentBuilderFactory
+
+/** 英文(默认)、简体和繁体三份界面文字要一一对上:同样的条目、同样的占位符(繁体对照简体);英文里不该留着没翻的中文。 */
+class StringResourcesTest {
+    private val en = ResFileTexts.english
+    private val zh = ResFileTexts.chinese
+    private val hant = ResFileTexts.traditional
+
+    /** 标了 translatable="false" 的条目只在默认文件里。 */
+    private val fixed: Set<String> = ResFileTexts.resFiles("values").flatMap { f ->
+        val nodes = DocumentBuilderFactory.newInstance().newDocumentBuilder().parse(f).getElementsByTagName("string")
+        (0 until nodes.length).map { nodes.item(it) as Element }.filter { it.getAttribute("translatable") == "false" }.map { it.getAttribute("name") }
+    }.toSet()
+
+    @Test
+    fun everyStringHasBothLanguages() {
+        assertEquals(en.strings.keys - fixed, zh.strings.keys)
+        assertEquals(en.plurals.keys, zh.plurals.keys)
+        assertTrue(en.strings.size > 300)
+    }
+
+    @Test
+    fun placeholdersMatch() {
+        // 日期两种语言取的字段不同(中文写月份数字,英文写月份名)
+        for (name in zh.strings.keys - setOf("date_month_day", "date_year_month_day")) assertEquals(name, args(en.strings.getValue(name)), args(zh.strings.getValue(name)))
+        for (name in zh.plurals.keys) {
+            val expected = args(zh.plurals.getValue(name).getValue("other"))
+            en.plurals.getValue(name).values.forEach { assertEquals(name, expected, args(it)) }
+        }
+    }
+
+    @Test
+    fun traditionalMatchesSimplified() {
+        assertEquals(zh.strings.keys, hant.strings.keys)
+        assertEquals(zh.plurals.keys, hant.plurals.keys)
+        for (name in zh.strings.keys) assertEquals(name, args(zh.strings.getValue(name)), args(hant.strings.getValue(name)))
+        for (name in zh.plurals.keys) {
+            assertEquals(name, zh.plurals.getValue(name).keys, hant.plurals.getValue(name).keys)
+            zh.plurals.getValue(name).forEach { (q, v) -> assertEquals("$name/$q", args(v), args(hant.plurals.getValue(name).getValue(q))) }
+        }
+    }
+
+    @Test
+    fun englishHasNoChineseLeftOver() {
+        // 例子里的博主名本来就是中文
+        val allowed = fixed + "chat_example_creator"
+        val cjk = Regex("[\\u4e00-\\u9fff]")
+        val left = en.strings.filter { (k, v) -> k !in allowed && cjk.containsMatchIn(v) }.keys +
+            en.plurals.filter { (_, forms) -> forms.values.any(cjk::containsMatchIn) }.keys
+        assertEquals(emptySet<String>(), left)
+    }
+
+    @Test
+    fun languageFromTag() {
+        // 单测里没有安卓的 ICU:补文字体系这一步换成假的,只认一个私用标签是繁体
+        val likely = { tag: String -> if (tag == "zh-x-hant") "Hant" else "Hans" }
+        fun of(tag: String?) = AppLanguage.fromTag(tag, likely)
+        assertEquals(AppLanguage.System, of(null))
+        assertEquals(AppLanguage.System, of(""))
+        // 以前选「中文」存下的是 zh-Hans
+        assertEquals(AppLanguage.SimplifiedChinese, of("zh-Hans"))
+        assertEquals(AppLanguage.TraditionalChinese, of("zh-Hant"))
+        assertEquals(AppLanguage.SimplifiedChinese, of("zh"))
+        // 没写文字体系时按补出来的算
+        assertEquals(AppLanguage.TraditionalChinese, of("zh-x-hant"))
+        // 写了文字体系就按写的,不再补
+        assertEquals(AppLanguage.SimplifiedChinese, AppLanguage.fromTag("zh-Hans") { "Hant" })
+        assertEquals(AppLanguage.English, of("en"))
+        assertEquals(AppLanguage.English, of("fr-FR"))
+    }
+
+    @Test
+    fun eachLanguageHasItsOwnTag() {
+        assertEquals(listOf(null, "zh-Hans", "zh-Hant", "en"), AppLanguage.entries.map { it.tag })
+        for (l in AppLanguage.entries) assertEquals(l, AppLanguage.fromTag(l.tag) { "Hans" })
+    }
+
+    private fun args(s: String): Set<String> = Regex("%(\\d+\\$)?[sd]").findAll(s).map { it.value }.toSet()
+}
